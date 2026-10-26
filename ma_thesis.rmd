@@ -1,0 +1,1027 @@
+---
+title: "Thesis data analysis"
+author: "Tuukka Puonti"
+date: "2026-06-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(corrplot)
+library(dendextend)
+library(RColorBrewer)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(viridis)
+library(mice)
+ 
+
+# DATA PREPARATION
+ 
+raw <- read.csv(
+  '.../file.csv',
+  sep = ";",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  encoding = "UTF-8",
+  check.names = FALSE
+)
+ 
+meta <- read.csv(
+  '.../metadata.csv',
+  sep = ";",
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  encoding = "UTF-8"
+)
+ 
+colnames(meta) <- c("Question", "Direction", "Principle")
+meta$Q_ID <- paste0("Q", 1:32)
+ 
+
+# PRELIM INFO
+
+short_map <- c(
+  "Respect for Human Agency"                       = "Human Agency",
+  "Privacy and Data Governance"                    = "Privacy & Data Gov.",
+  "Fairness"                                       = "Fairness",
+  "Individual, Social & Environmental well-being"  = "Well-Being",
+  "Transparency"                                   = "Transparency",
+  "Accountability & Oversight"                     = "Accountability",
+  "Worker Dignity & Equity"                        = "Worker Dignity",
+  "Human Resilience Through Continuous Learning"   = "Human Resilience"
+)
+
+job_short_map <- c(
+  "B2B Communication & Marketing"                  = "B2B Comms",
+  "CEO"                                            = "CEO",
+  "Engineer"                                       = "Engineer",
+  "Director of Mobile and Collaborative Robotics"  = "Mobile Robotics Dir.",
+  "R&D Director"                                   = "R&D Director",
+  "Co-Founder & COO"                               = "Co-Founder/COO",
+  "Robotics Researcher"                            = "Robotics Researcher",
+  "Sales"                                          = "Sales",
+  "Project manager"                                = "Project Manager",
+  "Project Manager"                                = "Project Manager",
+  "R&D Technician"                                 = "R&D Technician"
+)
+ 
+job_titles <- raw[[1]]
+for (i in seq_along(job_titles)) {
+  cat(sprintf("  R%02d: %s\n", i, job_titles[i]))
+}
+ 
+for (p in unique(meta$Principle)) {
+  n_q    <- sum(meta$Principle == p)
+  n_fwd  <- sum(meta$Principle == p & meta$Direction == "Forward")
+  n_rev  <- sum(meta$Principle == p & meta$Direction == "Reverse")
+}
+ 
+# RAW LIKERT DATA
+
+likert_raw <- raw[, 2:33]
+colnames(likert_raw) <- paste0("Q", 1:32)
+likert_raw <- as.data.frame(lapply(likert_raw, as.numeric))
+ 
+
+# DESCRIPTIVE STATISTICS
+ 
+likert_raw_na <- as.data.frame(lapply(likert_raw, function(x) {
+  x[x == 7] <- NA
+  x
+}))
+ 
+idk_counts <- colSums(likert_raw == 7, na.rm = TRUE)
+print(idk_counts)
+
+raw_desc <- data.frame(
+  Q_ID      = meta$Q_ID,
+  Principle = meta$Principle,
+  Direction = meta$Direction,
+  Mean      = round(sapply(likert_raw_na, mean,   na.rm = TRUE), 2),
+  Median    = round(sapply(likert_raw_na, median, na.rm = TRUE), 2),
+  SD        = round(sapply(likert_raw_na, sd,     na.rm = TRUE), 2),
+  Variance  = round(sapply(likert_raw_na, var,    na.rm = TRUE), 2),
+  Min       = sapply(likert_raw_na, min, na.rm = TRUE),
+  Max       = sapply(likert_raw_na, max, na.rm = TRUE),
+  N_missing = colSums(is.na(likert_raw_na))
+)
+ 
+print(raw_desc)
+write.csv(raw_desc, "descriptive_stats_raw_per_question.csv", row.names = FALSE)
+ 
+
+all_raw_values <- unlist(likert_raw_na)
+all_raw_values <- all_raw_values[!is.na(all_raw_values)]
+
+likert_raw_long <- reshape2::melt(
+  cbind(likert_raw_na, Respondent = 1:nrow(likert_raw_na)),
+  id.vars = "Respondent",
+  variable.name = "Question",
+  value.name = "Score"
+)
+ 
+p_raw_box <- ggplot(likert_raw_long, aes(x = Question, y = Score)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.6, outlier.size = 1.5) +
+  scale_y_continuous(limits = c(1, 6), breaks = 1:6) +
+  labs(
+    title    = "Distribution of Raw Scores per Question",
+    subtitle = "Scale 1-6, 'I don't know' responses excluded, before reverse coding",
+    x        = "Question",
+    y        = "Raw Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x  = element_text(angle = 90, hjust = 1, size = 7),
+    plot.title   = element_text(face = "bold")
+  )
+ 
+ggsave("plot_raw_score_distributions.png", p_raw_box, width = 14, height = 5, dpi = 150)
+
+# DATA PREPARATION, RECODING AND IMPUTATION
+
+likert_clean <- as.data.frame(lapply(likert_raw, function(x) {
+  x[x == 7] <- NA
+  x
+}))
+ 
+scale_max     <- 6
+reverse_items <- meta$Q_ID[meta$Direction == "Reverse"]
+
+likert_recoded <- likert_clean
+for (q in reverse_items) {
+  likert_recoded[[q]] <- (scale_max + 1) - likert_clean[[q]]
+}
+
+mice_imputed <- mice(
+  likert_recoded,
+  m         = 5,
+  method    = "pmm",
+  seed      = 42,
+  printFlag = FALSE
+)
+
+likert_recoded <- complete(mice_imputed, 1)
+ 
+
+# DESCRIPTIVE STATISTICS WITH RECODED DATA
+ 
+recoded_desc <- data.frame(
+  Q_ID      = meta$Q_ID,
+  Principle = meta$Principle,
+  Direction = meta$Direction,
+  Mean      = round(sapply(likert_recoded, mean,   na.rm = TRUE), 2),
+  Median    = round(sapply(likert_recoded, median, na.rm = TRUE), 2),
+  SD        = round(sapply(likert_recoded, sd,     na.rm = TRUE), 2),
+  Variance  = round(sapply(likert_recoded, var,    na.rm = TRUE), 2),
+  Min       = sapply(likert_recoded, min, na.rm = TRUE),
+  Max       = sapply(likert_recoded, max, na.rm = TRUE)
+)
+ 
+print(recoded_desc)
+write.csv(recoded_desc, "descriptive_stats_recoded_per_question.csv", row.names = FALSE)
+ 
+principles <- unique(meta$Principle)
+ 
+principle_scores <- data.frame(matrix(
+  NA, nrow = nrow(likert_recoded), ncol = length(principles)
+))
+colnames(principle_scores) <- principles
+ 
+for (p in principles) {
+  cols <- meta$Q_ID[meta$Principle == p]
+  principle_scores[[p]] <- rowMeans(likert_recoded[, cols], na.rm = TRUE)
+}
+ 
+principle_summary <- data.frame(
+  Principle = principles,
+  Mean      = round(colMeans(principle_scores, na.rm = TRUE), 2),
+  Median    = round(apply(principle_scores, 2, median, na.rm = TRUE), 2),
+  SD        = round(apply(principle_scores, 2, sd,     na.rm = TRUE), 2),
+  Variance  = round(apply(principle_scores, 2, var,    na.rm = TRUE), 2)
+)
+ 
+print(principle_summary)
+write.csv(principle_summary, "descriptive_stats_recoded_per_principle.csv", row.names = FALSE)
+ 
+scale_midpoint <- 3.5
+ 
+wilcox_results <- data.frame(
+  Principle   = principles,
+  Mean        = round(colMeans(principle_scores), 2),
+  Median      = round(apply(principle_scores, 2, median), 2),
+  SD          = round(apply(principle_scores, 2, sd), 2),
+  W           = NA,
+  p_value     = NA
+)
+ 
+for (i in seq_along(principles)) {
+  test <- wilcox.test(
+    principle_scores[[principles[i]]],
+    mu          = scale_midpoint,
+    alternative = "two.sided",
+    exact       = FALSE
+  )
+  wilcox_results$W[i]           <- test$statistic
+  wilcox_results$p_value[i]     <- round(test$p.value, 3)
+}
+ 
+print(wilcox_results)
+ 
+# VISUALISATIONS FOR DESCRIPTIVE STATISTICS
+
+principle_summary$Short <- c(
+  "Human\nAgency",
+  "Privacy &\nData Gov.",
+  "Fairness",
+  "Well-\nBeing",
+  "Trans-\nparency",
+  "Accountability\n& Oversight",
+  "Worker\nDignity",
+  "Human\nResilience"
+)
+ 
+p_bar <- ggplot(principle_summary, aes(x = reorder(Short, Mean), y = Mean, fill = Mean)) +
+  geom_col(width = 0.7) +
+  geom_errorbar(aes(ymin = Mean - SD, ymax = Mean + SD), width = 0.25, color = "grey30") +
+  geom_hline(yintercept = 3.5, linetype = "dashed", color = "red", linewidth = 0.7) +
+  scale_fill_viridis_c(option = "plasma", direction = -1, limits = c(1, 6)) +
+  scale_y_continuous(limits = c(0, 6), breaks = 1:6) +
+  coord_flip() +
+  labs(
+    title    = "Mean Ethical Principle Score Across Respondents",
+    subtitle = "Error bars: +/- 1 SD, Dashed line: scale midpoint (3.5), Scale: 1-6",
+    x        = NULL,
+    y        = "Mean Score (recoded)",
+    fill     = "Score"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right", plot.title = element_text(face = "bold"))
+ 
+ggsave("plot_principle_means.png", p_bar, width = 9, height = 5, dpi = 150)
+print(p_bar)
+ 
+ps_long            <- principle_scores
+ps_long$Respondent <- paste0("R", 1:nrow(ps_long), ": ", job_titles)
+ps_melt            <- melt(ps_long, id.vars = "Respondent",
+                           variable.name = "Principle", value.name = "Score")
+ 
+p_heat <- ggplot(ps_melt, aes(x = Principle, y = Respondent, fill = Score)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = round(Score, 1)), size = 3, color = "white", fontface = "bold") +
+  scale_fill_viridis_c(option = "plasma", direction = -1, limits = c(1, 6)) +
+  scale_x_discrete(labels = c(
+    "Respect for Human Agency"                       = "Agency",
+    "Privacy and Data Governance"                    = "Privacy",
+    "Fairness"                                       = "Fairness",
+    "Individual, Social & Environmental well-being"  = "Well-Being",
+    "Transparency"                                   = "Transparency",
+    "Accountability & Oversight"                     = "Accountability",
+    "Worker Dignity & Equity"                        = "Worker Dignity",
+    "Human Resilience Through Continuous Learning"   = "Resilience"
+  )) +
+  labs(
+    title    = "Respondent and Principle Score Heatmap",
+    x        = "Ethical Principle",
+    y        = "Respondent",
+    fill     = "Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    plot.title  = element_text(face = "bold"),
+    panel.grid  = element_blank()
+  )
+ 
+ggsave("plot_respondent_principle_heatmap.png", p_heat, width = 11, height = 7, dpi = 150)
+print(p_heat)
+
+# CLUSTERING MATRIX
+
+likert_for_clustering <- likert_recoded[, colnames(likert_recoded) != "Q30"]
+meta_for_clustering   <- meta[meta$Q_ID != "Q30", ]
+ 
+
+# CORRELATION MATRIX
+ 
+spearman_cor <- cor(
+  likert_for_clustering,
+  method = "spearman",
+  use    = "pairwise.complete.obs"
+)
+ 
+na_cors <- sum(is.na(spearman_cor))
+if (na_cors > 0) {
+  print(which(is.na(spearman_cor), arr.ind = TRUE))
+}
+ 
+png("plot_correlation_matrix.png", width = 1200, height = 1100, res = 120)
+corrplot(
+  spearman_cor,
+  method      = "color",
+  type        = "upper",
+  order       = "original",
+  tl.col      = "black",
+  tl.cex      = 0.7,
+  cl.cex      = 0.7,
+  addCoef.col = "black",
+  number.cex  = 0.45,
+  col         = colorRampPalette(c("#1a3a6b", "white", "#8b0000"))(200),
+  title       = "Spearman Correlation Matrix (recoded, Q30 excluded)",
+  mar         = c(0, 0, 2, 0)
+)
+ 
+group_sizes <- c(4, 4, 4, 4, 4, 4, 4, 3)
+starts      <- cumsum(c(0, head(group_sizes, -1)))
+n_q         <- ncol(likert_for_clustering)
+for (i in seq_along(group_sizes)) {
+  s <- starts[i]; e <- s + group_sizes[i]
+  rect(s + 0.5, n_q - e + 0.5, e + 0.5, n_q - s + 0.5, border = "black", lwd = 2)
+}
+dev.off()
+ 
+
+# HIERARCHICAL CLUSTERING FOR QUESTIONS
+ 
+dist_questions <- as.dist(1 - abs(spearman_cor))
+ 
+hc_ward    <- hclust(dist_questions, method = "ward.D2")
+hc_average <- hclust(dist_questions, method = "average")
+ 
+coph_ward    <- cor(dist_questions, cophenetic(hc_ward))
+coph_average <- cor(dist_questions, cophenetic(hc_average))
+ 
+principle_colors <- setNames(
+  brewer.pal(8, "Set1"),
+  c(
+    "Respect for Human Agency",
+    "Privacy and Data Governance",
+    "Fairness",
+    "Individual, Social & Environmental well-being",
+    "Transparency",
+    "Accountability & Oversight",
+    "Worker Dignity & Equity",
+    "Human Resilience Through Continuous Learning"
+  )
+)
+ 
+label_colors <- principle_colors[meta_for_clustering$Principle]
+names(label_colors) <- meta_for_clustering$Q_ID
+ 
+plot_question_dendrogram <- function(hc, method_name, label_cols) {
+  dend <- as.dendrogram(hc)
+ 
+  png(paste0("plot_dendrogram_questions_", gsub(" ", "_", method_name), ".png"),
+      width = 1400, height = 700, res = 120)
+  par(mar = c(8, 4, 4, 2))
+  plot(dend,
+       main = paste0("Hierarchical Clustering of Questions (Q30 excluded), ", method_name),
+       ylab = "Distance (1 - |Spearman r|)",
+       cex.main = 1.1)
+  dev.off()
+}
+ 
+plot_question_dendrogram(hc_ward,    "Ward's D2",       label_colors)
+plot_question_dendrogram(hc_average, "Average Linkage", label_colors)
+ 
+
+# HIERARCHICAL CLUSTERING FOR ETHICAL PRINCIPLES
+ 
+spearman_principles <- cor(
+  principle_scores,
+  method = "spearman",
+  use    = "pairwise.complete.obs"
+)
+ 
+print(round(spearman_principles, 2))
+ 
+dist_principles <- as.dist(1 - abs(spearman_principles))
+ 
+hc_prin_ward    <- hclust(dist_principles, method = "ward.D2")
+hc_prin_average <- hclust(dist_principles, method = "average")
+ 
+coph_prin_ward    <- cor(dist_principles, cophenetic(hc_prin_ward))
+coph_prin_average <- cor(dist_principles, cophenetic(hc_prin_average))
+ 
+principle_short_labels <- c(
+  "Respect for Human Agency"                       = "Human Agency",
+  "Privacy and Data Governance"                    = "Privacy & Data Gov.",
+  "Fairness"                                       = "Fairness",
+  "Individual, Social & Environmental well-being"  = "Well-Being",
+  "Transparency"                                   = "Transparency",
+  "Accountability & Oversight"                     = "Accountability",
+  "Worker Dignity & Equity"                        = "Worker Dignity",
+  "Human Resilience Through Continuous Learning"   = "Human Resilience"
+)
+
+
+ 
+plot_principle_dendrogram <- function(hc, method_name) {
+  dend          <- as.dendrogram(hc)
+  labels(dend)  <- principle_short_labels[labels(dend)]
+  leaf_colors   <- brewer.pal(8, "Set1")
+ 
+  png(paste0("plot_dendrogram_principles_", gsub(" ", "_", method_name), ".png"),
+      width = 1000, height = 700, res = 150)
+  par(mar = c(10, 4, 4, 2))
+  plot(dend,
+       main = paste0("Clustering of Ethical Principles, ", method_name),
+       ylab = "Distance (1 - |Spearman r|)",
+       cex.main = 1.1,
+       cex      = 0.95)
+  dev.off()
+}
+ 
+plot_principle_dendrogram(hc_prin_ward,    "Ward's D2")
+plot_principle_dendrogram(hc_prin_average, "Average Linkage")
+ 
+
+# HIERARCHICAL CLUSTERING FOR RESPONDENTS
+ 
+dist_respondents <- dist(principle_scores, method = "euclidean")
+ 
+hc_resp_ward    <- hclust(dist_respondents, method = "ward.D2")
+hc_resp_average <- hclust(dist_respondents, method = "average")
+ 
+coph_resp_ward    <- cor(dist_respondents, cophenetic(hc_resp_ward))
+coph_resp_average <- cor(dist_respondents, cophenetic(hc_resp_average))
+ 
+resp_labels <- paste0("R", 1:nrow(likert_recoded), ": ", job_short_map[job_titles])
+ 
+plot_respondent_dendrogram <- function(hc, method_name, labels) {
+  hc$labels <- labels
+  dend      <- as.dendrogram(hc)
+ 
+  png(paste0("plot_dendrogram_respondents_", gsub("[' ]", "_", method_name), ".png"),
+      width = 1000, height = 700, res = 120)
+  par(mar = c(12, 4, 4, 2))
+  plot(dend,
+       main     = paste0("Hierarchical Clustering of Respondents, ", method_name),
+       ylab     = "Euclidean Distance",
+       cex.axis = 0.9,
+       cex.main = 1.1)
+  dev.off()
+}
+ 
+plot_respondent_dendrogram(hc_resp_ward,    "Ward's D2",       resp_labels)
+plot_respondent_dendrogram(hc_resp_average, "Average Linkage", resp_labels)
+
+
+# CLUSTERED HEATMAP
+ 
+short_prin_names <- c(
+  "Respect for Human Agency"                       = "Human Agency",
+  "Privacy and Data Governance"                    = "Privacy & Data Gov.",
+  "Fairness"                                       = "Fairness",
+  "Individual, Social & Environmental well-being"  = "Well-Being",
+  "Transparency"                                   = "Transparency",
+  "Accountability & Oversight"                     = "Accountability",
+  "Worker Dignity & Equity"                        = "Worker Dignity",
+  "Human Resilience Through Continuous Learning"   = "Human Resilience"
+)
+ 
+resp_order <- hc_resp_average$order
+prin_order <- hc_prin_average$order
+ 
+ps_clustered <- principle_scores[resp_order, prin_order]
+rownames(ps_clustered) <- paste0("R", resp_order, ": ", job_titles[resp_order])
+colnames(ps_clustered) <- short_prin_names[colnames(principle_scores)[prin_order]]
+ 
+ps_clust_long <- as.data.frame(ps_clustered)
+ps_clust_long$Respondent <- factor(rownames(ps_clustered),
+                                    levels = rev(rownames(ps_clustered)))
+ps_clust_melt <- melt(ps_clust_long,
+                      id.vars       = "Respondent",
+                      variable.name = "Principle",
+                      value.name    = "Score")
+ps_clust_melt$Principle <- factor(ps_clust_melt$Principle,
+                                   levels = colnames(ps_clustered))
+ 
+p_clust_heat <- ggplot(ps_clust_melt,
+                       aes(x = Principle, y = Respondent, fill = Score)) +
+  geom_tile(color = "white", linewidth = 0.6) +
+  geom_text(aes(label = round(Score, 1)), size = 2.8,
+            color = "white", fontface = "bold") +
+  scale_fill_viridis_c(option = "plasma", direction = -1, limits = c(1, 6)) +
+  labs(
+    title    = "Clustered Heatmap: Respondents and Ethical Principles",
+    subtitle = "Rows and columns reordered by average linkage cluster solution",
+    x        = "Ethical Principle (clustered)",
+    y        = "Respondent (clustered)",
+    fill     = "Score"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x  = element_text(angle = 35, hjust = 1, size = 9),
+    axis.text.y  = element_text(size = 8),
+    plot.title   = element_text(face = "bold"),
+    panel.grid   = element_blank()
+  )
+ 
+ggsave("plot_clustered_heatmap.png", p_clust_heat, width = 11, height = 7, dpi = 150)
+print(p_clust_heat)
+
+# PARALLEL COORDINATES PLOT
+
+k_respondents <- 2
+resp_clusters <- cutree(hc_resp_average, k = k_respondents)
+
+for (i in 1:k_respondents) {
+  members <- which(resp_clusters == i)
+}
+ 
+pc_data            <- principle_scores
+pc_data$Respondent <- paste0("R", 1:nrow(pc_data), ": ", job_titles)
+pc_data$Cluster    <- factor(paste("Cluster", resp_clusters[1:nrow(pc_data)]))
+colnames(pc_data)[1:8] <- unname(short_prin_names[colnames(pc_data)[1:8]])
+ 
+pc_long <- melt(pc_data,
+                id.vars       = c("Respondent", "Cluster"),
+                variable.name = "Principle",
+                value.name    = "Score")
+pc_long$Principle <- factor(pc_long$Principle,
+                             levels = colnames(ps_clustered))
+ 
+cluster_colors <- brewer.pal(max(k_respondents, 3), "Set2")[1:k_respondents]
+ 
+p_parallel <- ggplot(pc_long,
+                     aes(x = Principle, y = Score,
+                         group = Respondent, color = Cluster)) +
+  geom_line(linewidth = 0.9, alpha = 0.8) +
+  geom_point(size = 2.5, alpha = 0.9) +
+  scale_color_manual(values = cluster_colors) +
+  scale_y_continuous(limits = c(1, 6), breaks = 1:6) +
+  geom_hline(yintercept = 3.5, linetype = "dashed",
+             color = "grey50", linewidth = 0.5) +
+  labs(
+    title    = "Respondent Ethical Profiles",
+    subtitle = "Each line represent one respondent",
+    x        = "Ethical Principle",
+    y        = "Score (1-6, recoded)",
+    color    = "Cluster"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x     = element_text(angle = 35, hjust = 1, size = 9),
+    plot.title      = element_text(face = "bold"),
+    legend.position = "right"
+  )
+ 
+ggsave("plot_parallel_coordinates.png", p_parallel, width = 12, height = 6, dpi = 150)
+print(p_parallel)
+
+```
+
+
+```{r}
+# ELBOW METHOD FOR RESPONDENTS
+
+max_k <- nrow(principle_scores) - 1
+
+wss <- numeric(max_k)
+
+for (k in 1:max_k) {
+  clusters <- cutree(hc_resp_average, k = k)
+  
+  wss[k] <- sum(sapply(1:k, function(cluster) {
+    members <- principle_scores[clusters == cluster, ]
+    if (is.data.frame(members) && nrow(members) > 1) {
+      centroid <- colMeans(members)
+      sum(apply(members, 1, function(x) sum((x - centroid)^2)))
+    } else {
+      0
+    }
+  }))
+}
+
+elbow_data <- data.frame(
+  k   = 1:max_k,
+  WSS = wss
+)
+
+print(elbow_data)
+
+elbow_data$WSS_drop    <- c(NA, diff(elbow_data$WSS) * -1)
+elbow_data$WSS_drop_pct <- c(NA, round(elbow_data$WSS_drop[2:max_k] / elbow_data$WSS[1:(max_k-1)] * 100, 1))
+
+print(elbow_data)
+
+p_elbow <- ggplot(elbow_data, aes(x = k, y = WSS)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(size = 3, color = "steelblue") +
+  scale_x_continuous(breaks = 1:max_k) +
+  labs(
+    title    = "Elbow Method, Optimal Number of Respondent Clusters",
+    x        = "Number of Clusters (k)",
+    y        = "Within-Cluster Sum of Squares (WSS)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("plot_elbow_respondents.png", p_elbow, width = 8, height = 5, dpi = 150)
+print(p_elbow)
+```
+
+```{r}
+# ELBOW METHOD FOR ETHICAL PRINCIPLES
+
+max_k_prin <- ncol(principle_scores) - 1
+
+wss_prin <- numeric(max_k_prin)
+
+for (k in 1:max_k_prin) {
+  clusters <- cutree(hc_prin_average, k = k)
+  
+  wss_prin[k] <- sum(sapply(1:k, function(cluster) {
+
+    members <- t(principle_scores)[clusters == cluster, , drop = FALSE]
+    if (nrow(members) > 1) {
+      centroid <- colMeans(members)
+      sum(apply(members, 1, function(x) sum((x - centroid)^2)))
+    } else {
+      0
+    }
+  }))
+}
+
+elbow_prin_data <- data.frame(
+  k   = 1:max_k_prin,
+  WSS = wss_prin
+)
+
+elbow_prin_data$WSS_drop     <- c(NA, -diff(elbow_prin_data$WSS))
+elbow_prin_data$WSS_drop_pct <- c(NA, round(
+  elbow_prin_data$WSS_drop[2:max_k_prin] / 
+  elbow_prin_data$WSS[1:(max_k_prin - 1)] * 100, 1))
+
+print(elbow_prin_data)
+
+p_elbow_prin <- ggplot(elbow_prin_data, aes(x = k, y = WSS)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(size = 3, color = "steelblue") +
+  scale_x_continuous(breaks = 1:max_k_prin) +
+  labs(
+    title    = "Optimal Number of Principle Clusters",
+    x        = "Number of Clusters (k)",
+    y        = "Within-Cluster Sum of Squares (WSS)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("plot_elbow_principles.png", p_elbow_prin, width = 8, height = 5, dpi = 150)
+print(p_elbow_prin)
+```
+
+```{r}
+# LARGEST GAP CRITERION FOR PRINCIPLE AND RESPONDENT DENDROGRAMS
+
+heights_prin <- hc_prin_average$height
+
+gaps_prin <- data.frame(
+  Merge_step     = 1:(length(heights_prin) - 1),
+  Height_lower   = round(heights_prin[1:(length(heights_prin) - 1)], 4),
+  Height_upper   = round(heights_prin[2:length(heights_prin)], 4),
+  Gap            = round(diff(heights_prin), 4)
+)
+
+gaps_prin$k_clusters <- length(heights_prin) + 1 - gaps_prin$Merge_step
+
+print(gaps_prin[order(-gaps_prin$Gap), ])
+
+largest_gap_prin <- gaps_prin[which.max(gaps_prin$Gap), ]
+
+heights_resp <- hc_resp_average$height
+
+gaps_resp <- data.frame(
+  Merge_step   = 1:(length(heights_resp) - 1),
+  Height_lower = round(heights_resp[1:(length(heights_resp) - 1)], 4),
+  Height_upper = round(heights_resp[2:length(heights_resp)], 4),
+  Gap          = round(diff(heights_resp), 4)
+)
+
+gaps_resp$k_clusters <- length(heights_resp) + 1 - gaps_resp$Merge_step
+
+print(gaps_resp[order(-gaps_resp$Gap), ])
+
+largest_gap_resp <- gaps_resp[which.max(gaps_resp$Gap), ]
+
+png("plot_dendrogram_principles_gap.png", width = 1000, height = 700, res = 150)
+par(mar = c(10, 4, 4, 2))
+
+dend_prin_gap <- as.dendrogram(hc_prin_average)
+labels(dend_prin_gap) <- principle_short_labels[labels(dend_prin_gap)]
+
+plot(dend_prin_gap,
+     main = "Clustering of Ethical Principles, Average Linkage",
+     ylab = "Distance (1 - |Spearman r|)",
+     cex.main = 1.1)
+
+cut_height_prin <- mean(c(largest_gap_prin$Height_lower,
+                           largest_gap_prin$Height_upper))
+abline(h = cut_height_prin, col = "red", lty = 2, lwd = 2)
+text(x = 1, y = cut_height_prin + 0.02,
+     labels = paste0("Cut = ", round(cut_height_prin, 3),
+                     " (k = ", largest_gap_prin$k_clusters, ")"),
+     col = "red", cex = 0.8, adj = 0)
+dev.off()
+
+png("plot_dendrogram_respondents_gap.png", width = 1000, height = 700, res = 120)
+par(mar = c(12, 4, 4, 2))
+plot(as.dendrogram(hc_resp_average),
+     main = "Hierarchical Clustering of Respondents, Average Linkage",
+     ylab = "Euclidean Distance",
+     cex.main = 1.1)
+cut_height_resp <- mean(c(largest_gap_resp$Height_lower, 
+                           largest_gap_resp$Height_upper))
+abline(h = cut_height_resp, col = "red", lty = 2, lwd = 2)
+text(x = 1, y = cut_height_resp + 0.1,
+     labels = paste0("Cut = ", round(cut_height_resp, 3),
+                     " (k = ", largest_gap_resp$k_clusters, ")"),
+     col = "red", cex = 0.8, adj = 0)
+dev.off()
+
+```
+
+```{r}
+# ELBOW METHOD AND LARGEST GAP CRITERION FOR ITEM LEVEL DENDROGRAM
+library(cluster)
+
+max_k_items <- ncol(likert_for_clustering) - 1
+
+wss_items <- numeric(max_k_items)
+
+for (k in 1:max_k_items) {
+  clusters <- cutree(hc_average, k = k)
+  
+  wss_items[k] <- sum(sapply(1:k, function(cluster) {
+    members <- t(likert_for_clustering)[clusters == cluster, , drop = FALSE]
+    if (nrow(members) > 1) {
+      centroid <- colMeans(members)
+      sum(apply(members, 1, function(x) sum((x - centroid)^2)))
+    } else {
+      0
+    }
+  }))
+}
+
+elbow_items_data <- data.frame(
+  k   = 1:max_k_items,
+  WSS = wss_items
+)
+
+elbow_items_data$WSS_drop     <- c(NA, -diff(elbow_items_data$WSS))
+elbow_items_data$WSS_drop_pct <- c(NA, round(
+  elbow_items_data$WSS_drop[2:max_k_items] /
+  elbow_items_data$WSS[1:(max_k_items - 1)] * 100, 1))
+
+print(elbow_items_data)
+
+p_elbow_items <- ggplot(elbow_items_data, aes(x = k, y = WSS)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  scale_x_continuous(breaks = seq(1, max_k_items, by = 2)) +
+  labs(
+    title    = "Optimal Number of Item Clusters",
+    x        = "Number of Clusters (k)",
+    y        = "Within-Cluster Sum of Squares (WSS)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("plot_elbow_items.png", p_elbow_items, width = 9, height = 5, dpi = 150)
+print(p_elbow_items)
+
+heights_items <- hc_average$height
+
+gaps_items <- data.frame(
+  Merge_step   = 1:(length(heights_items) - 1),
+  Height_lower = round(heights_items[1:(length(heights_items) - 1)], 4),
+  Height_upper = round(heights_items[2:length(heights_items)], 4),
+  Gap          = round(diff(heights_items), 4)
+)
+
+gaps_items$k_clusters <- length(heights_items) + 1 - gaps_items$Merge_step
+
+print(gaps_items[order(-gaps_items$Gap), ], row.names = FALSE)
+
+largest_gap_items <- gaps_items[which.max(gaps_items$Gap), ]
+
+cut_height_items <- mean(c(largest_gap_items$Height_lower,
+                            largest_gap_items$Height_upper))
+
+item_labels <- paste0(
+  meta_for_clustering$Q_ID, " (",
+  gsub("Respect for Human Agency",                      "Agency",
+  gsub("Privacy and Data Governance",                   "Privacy",
+  gsub("Fairness",                                      "Fairness",
+  gsub("Individual, Social & Environmental well-being", "Well-Being",
+  gsub("Transparency",                                  "Transparency",
+  gsub("Accountability & Oversight",                    "Account.",
+  gsub("Worker Dignity & Equity",                       "Worker Dig.",
+  gsub("Human Resilience Through Continuous Learning",  "Resilience",
+  meta_for_clustering$Principle)))))))),
+  ")"
+)
+names(item_labels) <- meta_for_clustering$Q_ID
+
+png("plot_dendrogram_items_gap.png", width = 1600, height = 800, res = 130)
+par(mar = c(12, 4, 4, 2))
+
+dend_items <- as.dendrogram(hc_average)
+labels(dend_items) <- item_labels[labels(dend_items)]
+
+plot(dend_items,
+     main     = "Hierarchical Clustering of Items, Average Linkage",
+     ylab     = "Distance (1 - |Spearman r|)",
+     cex.main = 1.0,
+     cex      = 0.7)
+
+abline(h = cut_height_items, col = "red", lty = 2, lwd = 2)
+text(x = 2, y = cut_height_items + 0.02,
+     labels = paste0("Cut = ", round(cut_height_items, 3),
+                     "  (k = ", largest_gap_items$k_clusters, ")"),
+     col = "red", cex = 0.8, adj = 0)
+
+dev.off()
+
+sil_widths_items <- numeric(min(max_k_items - 1, 20))
+
+for (k in 2:min(max_k_items, 21)) {
+  clusters         <- cutree(hc_average, k = k)
+  sil              <- silhouette(clusters, dist_questions)
+  sil_widths_items[k - 1] <- mean(sil[, 3])
+}
+
+sil_items_data <- data.frame(
+  k              = 2:min(max_k_items, 21),
+  Avg_Silhouette = round(sil_widths_items, 3)
+)
+
+print(sil_items_data)
+
+p_sil_items <- ggplot(sil_items_data, aes(x = k, y = Avg_Silhouette)) +
+  geom_line(linewidth = 1, color = "steelblue") +
+  geom_point(size = 2.5, color = "steelblue") +
+  geom_vline(xintercept = sil_items_data$k[which.max(sil_items_data$Avg_Silhouette)],
+             linetype = "dashed", color = "red", linewidth = 0.8) +
+  scale_x_continuous(breaks = 2:min(max_k_items, 21)) +
+  labs(
+    title    = "Optimal Number of Item Clusters",
+    x        = "Number of Clusters (k)",
+    y        = "Average Silhouette Width"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("plot_silhouette_items.png", p_sil_items, width = 9, height = 5, dpi = 150)
+print(p_sil_items)
+
+```
+```{r}
+
+# SILHOUETTE CUTS
+
+
+library(cluster)
+
+optimal_k_prin <- 2
+clusters_prin  <- cutree(hc_prin_average, k = optimal_k_prin)
+
+prin_cluster_table <- data.frame(
+  Principle = names(clusters_prin),
+  Cluster   = clusters_prin
+)
+prin_cluster_table <- prin_cluster_table[order(prin_cluster_table$Cluster), ]
+
+print(prin_cluster_table, row.names = FALSE)
+
+for (cl in sort(unique(prin_cluster_table$Cluster))) {
+  members <- prin_cluster_table$Principle[prin_cluster_table$Cluster == cl]
+  for (m in members) cat(sprintf("  - %s\n", m))
+}
+
+heights_prin   <- sort(hc_prin_average$height)
+n_prin         <- length(heights_prin)
+cut_height_prin_k3 <- mean(c(heights_prin[n_prin - optimal_k_prin + 1],
+                               heights_prin[n_prin - optimal_k_prin + 2]))
+
+sil_prin_k3 <- silhouette(clusters_prin, dist_principles)
+
+png("plot_silhouette_principles_k3_detail.png", width = 800, height = 600, res = 120)
+par(mar = c(5, 14, 4, 2))
+plot(sil_prin_k3,
+     main   = "Silhouette Plot, Ethical Principles (k=2)",
+     border = NA,
+     col    = brewer.pal(3, "Set2"))
+dev.off()
+
+png("plot_dendrogram_principles_k3_cut.png", width = 1000, height = 700, res = 150)
+par(mar = c(10, 4, 4, 2))
+
+dend_prin <- as.dendrogram(hc_prin_average)
+labels(dend_prin) <- principle_short_labels[labels(dend_prin)]
+
+plot(dend_prin,
+     main     = "Clustering of Ethical Principles, Average Linkage (k=3 cut)",
+     ylab     = "Distance (1 - |Spearman r|)",
+     cex.main = 1.0,
+     cex      = 0.95)
+
+abline(h = cut_height_prin_k3, col = "red", lty = 2, lwd = 2)
+text(x = 1, y = cut_height_prin_k3 + 0.02,
+     labels = paste0("Cut = ", round(cut_height_prin_k3, 3), "  (k = 3)"),
+     col = "red", cex = 0.8, adj = 0)
+
+dev.off()
+
+max_k_resp <- nrow(principle_scores) - 1
+sil_widths_resp <- numeric(max_k_resp - 1)
+
+for (k in 2:max_k_resp) {
+  clusters         <- cutree(hc_resp_average, k = k)
+  sil              <- silhouette(clusters, dist_respondents)
+  sil_widths_resp[k - 1] <- mean(sil[, 3])
+}
+
+sil_resp_data <- data.frame(
+  k              = 2:max_k_resp,
+  Avg_Silhouette = round(sil_widths_resp, 3)
+)
+
+optimal_k_resp <- sil_resp_data$k[which.max(sil_resp_data$Avg_Silhouette)]
+
+clusters_resp <- cutree(hc_resp_average, k = optimal_k_resp)
+
+resp_cluster_table <- data.frame(
+  Respondent = paste0("R", 1:nrow(principle_scores), ": ", job_titles),
+  Cluster    = clusters_resp
+)
+resp_cluster_table <- resp_cluster_table[order(resp_cluster_table$Cluster), ]
+
+print(resp_cluster_table, row.names = FALSE)
+
+
+for (cl in sort(unique(resp_cluster_table$Cluster))) {
+  members <- resp_cluster_table$Respondent[resp_cluster_table$Cluster == cl]
+  for (m in members) cat(sprintf("  - %s\n", m))
+}
+
+heights_resp   <- sort(hc_resp_average$height)
+n_resp         <- length(heights_resp)
+cut_height_resp_opt <- mean(c(heights_resp[n_resp - optimal_k_resp + 1],
+                               heights_resp[n_resp - optimal_k_resp + 2]))
+
+
+sil_resp_opt <- silhouette(clusters_resp, dist_respondents)
+rownames(sil_resp_opt) <- paste0("R", 1:nrow(principle_scores), ": ", job_titles)
+
+png("plot_silhouette_respondents_detail.png", width = 800, height = 700, res = 120)
+par(mar = c(5, 14, 4, 2))
+plot(sil_resp_opt,
+     main   = paste0("Silhouette Plot, Respondents (k=", optimal_k_resp, ")"),
+     border = NA,
+     col    = brewer.pal(max(optimal_k_resp, 3), "Set2")[1:optimal_k_resp])
+dev.off()
+
+png("plot_dendrogram_respondents_silhouette_cut.png", width = 1100, height = 700, res = 120)
+par(mar = c(12, 4, 4, 2))
+
+dend_resp <- as.dendrogram(hc_resp_average)
+labels(dend_resp) <- paste0("R", 1:nrow(principle_scores), ": ", job_titles)
+
+plot(dend_resp,
+     main     = paste0("Hierarchical Clustering of Respondents, Average Linkage (k=",
+                        optimal_k_resp, " cut)"),
+     ylab     = "Euclidean Distance",
+     cex.main = 1.0,
+     cex      = 0.8)
+
+abline(h = cut_height_resp_opt, col = "red", lty = 2, lwd = 2)
+text(x = 1, y = cut_height_resp_opt + 0.1,
+     labels = paste0("Cut = ", round(cut_height_resp_opt, 3),
+                     "  (k = ", optimal_k_resp, ")"),
+     col = "red", cex = 0.8, adj = 0)
+
+dev.off()
+```
+
+
+
+
+```{r}
+library(cluster)
+for (k in 2:4) {
+  cl <- cutree(hc_prin_average, k = k)
+  s  <- silhouette(cl, dist_principles)
+  cat("k =", k, " avg silhouette =", round(mean(s[, 3]), 3), "\n")
+}
+
+```
+
+
+
